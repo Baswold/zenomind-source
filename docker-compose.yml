@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # Redis for task queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Backend API server
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - MEMORY_PERSIST_DIR=/app/data/memory
+    volumes:
+      - ./backend:/app/backend
+      - ./openmanus-source:/app/openmanus-source
+      - memory_data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend development server
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app/frontend
+      - /app/frontend/node_modules
+    environment:
+      - NODE_ENV=development
+    command: npm run dev:frontend
+
+  # Playwright browser (for running in Docker)
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.51.0
+    volumes:
+      - ./backend:/app/backend
+      - ./openmanus-source:/app/openmanus-source
+    environment:
+      - DISPLAY=:99
+    command: tail -f /dev/null
+
+volumes:
+  redis_data:
+  memory_data:

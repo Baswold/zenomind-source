@@ -1,0 +1,17 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm install
+
+# Copy frontend code
+COPY frontend /app/frontend
+COPY vite.config.js tailwind.config.js postcss.config.js ./
+
+EXPOSE 3000
+
+CMD ["npm", "run", "dev:frontend"]

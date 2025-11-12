@@ -1,0 +1,49 @@
+# ZenoMind Configuration
+# Copy from openmanus-source/config/config.toml and customize
+
+[llm]
+model = "claude-3-7-sonnet-20250219"
+base_url = "https://api.anthropic.com/v1/"
+api_key = "${ANTHROPIC_API_KEY}"
+max_tokens = 8192
+temperature = 0.0
+api_type = "openai"
+
+[llm.vision]
+model = "claude-3-7-sonnet-20250219"
+base_url = "https://api.anthropic.com/v1/"
+api_key = "${ANTHROPIC_API_KEY}"
+max_tokens = 8192
+
+[browser]
+headless = false
+disable_security = true
+extra_chromium_args = []
+max_content_length = 2000
+max_tabs = 10
+
+[search]
+engine = "Google"
+fallback_engines = ["DuckDuckGo", "Baidu", "Bing"]
+retry_delay = 60
+max_retries = 3
+
+[sandbox]
+use_sandbox = false
+image = "python:3.12-slim"
+work_dir = "/workspace"
+memory_limit = "512m"
+cpu_limit = 2.0
+timeout = 300
+network_enabled = true
+
+[tasks]
+max_concurrent = 3
+default_timeout = 1800
+enable_auto_retry = true
+
+[memory]
+vector_db = "chromadb"
+embedding_model = "all-MiniLM-L6-v2"
+max_memories = 10000
+persist_directory = "./data/memory"
