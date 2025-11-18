@@ -46,9 +46,12 @@ class AmbientAgent:
         self.created_at = datetime.now()
         self.current_task_id: Optional[str] = None
 
-        # Learning system
+        # Advanced learning system
         self.experience_buffer: List[Dict] = []
         self.success_patterns: List[Dict] = []
+        self.failure_patterns: List[Dict] = []
+        self.task_type_performance: Dict[str, Dict[str, Any]] = {}
+        self.learning_enabled = True
 
     async def initialize(self):
         """Initialize the ambient agent"""
@@ -228,29 +231,255 @@ class AmbientAgent:
 
         logger.info(f"📚 Stored experience for task {task_id}")
 
-    async def learn_from_task(self, prompt: str, result: str):
+    async def learn_from_task(self, prompt: str, result: str, success: bool = True):
         """
-        Auto-learning: Extract patterns from successful tasks
-        This is a signature feature - the agent learns over time!
+        Advanced auto-learning: Extract patterns and predict future performance
+        This is a signature feature - the agent learns and improves over time!
+
+        Features:
+        - Task type classification
+        - Success/failure pattern recognition
+        - Performance prediction
+        - Strategy optimization
+        - Continuous improvement
         """
-        # Simple pattern extraction: identify successful strategies
-        if len(self.experience_buffer) > 10:
-            # Analyze recent successful tasks
-            recent_successes = [
-                exp for exp in self.experience_buffer[-20:]
+        if not self.learning_enabled:
+            return
+
+        task_type = self._classify_task(prompt)
+
+        # Update task type performance tracking
+        if task_type not in self.task_type_performance:
+            self.task_type_performance[task_type] = {
+                "total_attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "average_complexity": 0.0,
+                "common_keywords": [],
+                "success_strategies": [],
+                "failure_causes": []
+            }
+
+        perf = self.task_type_performance[task_type]
+        perf["total_attempts"] += 1
+
+        if success:
+            perf["successes"] += 1
+        else:
+            perf["failures"] += 1
+
+        # Extract keywords from prompt
+        keywords = self._extract_keywords(prompt)
+
+        # Update common keywords
+        for keyword in keywords:
+            if keyword not in perf["common_keywords"]:
+                perf["common_keywords"].append(keyword)
+
+        # Analyze patterns periodically
+        if len(self.experience_buffer) >= 10:
+            await self._analyze_patterns()
+
+        # Make predictions for similar future tasks
+        prediction = self._predict_success_probability(prompt)
+
+        logger.info(
+            f"🎓 Learning update: {task_type} "
+            f"(success rate: {perf['successes']}/{perf['total_attempts']}, "
+            f"predicted: {prediction:.1%})"
+        )
+
+    async def _analyze_patterns(self):
+        """Analyze recent experiences to extract patterns"""
+        recent_experiences = self.experience_buffer[-50:]  # Last 50 tasks
+
+        # Group by success/failure
+        successes = [exp for exp in recent_experiences if exp["success"]]
+        failures = [exp for exp in recent_experiences if not exp["success"]]
+
+        # Analyze successful patterns
+        if len(successes) >= 5:
+            success_pattern = self._extract_common_features(successes)
+
+            self.success_patterns.append({
+                **success_pattern,
+                "timestamp": datetime.now().isoformat(),
+                "sample_size": len(successes)
+            })
+
+            # Keep only recent patterns
+            if len(self.success_patterns) > 20:
+                self.success_patterns = self.success_patterns[-20:]
+
+            logger.info(f"✨ Extracted success pattern with {len(successes)} examples")
+
+        # Analyze failure patterns
+        if len(failures) >= 3:
+            failure_pattern = self._extract_common_features(failures)
+
+            self.failure_patterns.append({
+                **failure_pattern,
+                "timestamp": datetime.now().isoformat(),
+                "sample_size": len(failures)
+            })
+
+            # Keep only recent patterns
+            if len(self.failure_patterns) > 10:
+                self.failure_patterns = self.failure_patterns[-10:]
+
+            logger.warning(f"⚠️ Extracted failure pattern with {len(failures)} examples")
+
+    def _extract_common_features(self, experiences: List[Dict]) -> Dict[str, Any]:
+        """Extract common features from a set of experiences"""
+        # Extract task types
+        task_types = [self._classify_task(exp["prompt"]) for exp in experiences]
+
+        # Find most common task type
+        task_type_counts = {}
+        for tt in task_types:
+            task_type_counts[tt] = task_type_counts.get(tt, 0) + 1
+
+        most_common_type = max(task_type_counts.items(), key=lambda x: x[1])[0]
+
+        # Extract common keywords
+        all_keywords = []
+        for exp in experiences:
+            all_keywords.extend(self._extract_keywords(exp["prompt"]))
+
+        # Count keyword frequency
+        keyword_counts = {}
+        for keyword in all_keywords:
+            keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+
+        # Get top keywords
+        top_keywords = sorted(
+            keyword_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:10]
+
+        return {
+            "dominant_task_type": most_common_type,
+            "task_type_distribution": task_type_counts,
+            "common_keywords": [kw for kw, _ in top_keywords],
+            "keyword_frequencies": dict(top_keywords)
+        }
+
+    def _extract_keywords(self, prompt: str) -> List[str]:
+        """Extract meaningful keywords from prompt"""
+        # Simple keyword extraction (in production, use NLP)
+        stop_words = {
+            "the", "a", "an", "and", "or", "but", "in", "on", "at",
+            "to", "for", "of", "with", "by", "from", "as", "is", "was",
+            "are", "were", "be", "been", "being", "have", "has", "had",
+            "do", "does", "did", "will", "would", "should", "could",
+            "may", "might", "must", "can", "this", "that", "these", "those"
+        }
+
+        words = prompt.lower().split()
+        keywords = [
+            word.strip('.,!?;:')
+            for word in words
+            if len(word) > 3 and word.lower() not in stop_words
+        ]
+
+        return keywords
+
+    def _predict_success_probability(self, prompt: str) -> float:
+        """
+        Predict probability of success for a given task
+
+        Based on:
+        - Historical performance for similar task types
+        - Keyword similarity to past successes
+        - Recent success rate trends
+        """
+        task_type = self._classify_task(prompt)
+
+        # Base probability from task type performance
+        if task_type in self.task_type_performance:
+            perf = self.task_type_performance[task_type]
+            attempts = perf["total_attempts"]
+
+            if attempts > 0:
+                base_prob = perf["successes"] / attempts
+            else:
+                base_prob = 0.5  # Default
+        else:
+            base_prob = 0.5  # Default for unknown task types
+
+        # Adjust based on keyword similarity to success patterns
+        prompt_keywords = set(self._extract_keywords(prompt))
+
+        if self.success_patterns:
+            # Find most similar success pattern
+            max_similarity = 0.0
+
+            for pattern in self.success_patterns:
+                pattern_keywords = set(pattern.get("common_keywords", []))
+
+                if pattern_keywords:
+                    # Jaccard similarity
+                    intersection = len(prompt_keywords & pattern_keywords)
+                    union = len(prompt_keywords | pattern_keywords)
+                    similarity = intersection / union if union > 0 else 0
+
+                    max_similarity = max(max_similarity, similarity)
+
+            # Boost probability based on similarity to successful patterns
+            base_prob = base_prob * 0.7 + max_similarity * 0.3
+
+        # Adjust based on recent trend
+        if len(self.experience_buffer) >= 10:
+            recent_successes = sum(
+                1 for exp in self.experience_buffer[-10:]
                 if exp["success"]
-            ]
+            )
+            recent_rate = recent_successes / 10
 
-            if len(recent_successes) >= 5:
-                # Find common patterns (simplified for now)
-                pattern = {
-                    "task_type": self._classify_task(prompt),
-                    "success_rate": len(recent_successes) / 20,
-                    "timestamp": datetime.now().isoformat()
-                }
+            # Slight adjustment based on recent performance
+            base_prob = base_prob * 0.9 + recent_rate * 0.1
 
-                self.success_patterns.append(pattern)
-                logger.info(f"🎓 Learned new pattern: {pattern['task_type']}")
+        return min(max(base_prob, 0.0), 1.0)
+
+    async def get_learning_insights(self) -> Dict[str, Any]:
+        """Get insights from the learning system"""
+        insights = {
+            "total_experiences": len(self.experience_buffer),
+            "success_patterns": len(self.success_patterns),
+            "failure_patterns": len(self.failure_patterns),
+            "task_type_performance": {}
+        }
+
+        # Add task type performance
+        for task_type, perf in self.task_type_performance.items():
+            total = perf["total_attempts"]
+            success_rate = (perf["successes"] / total * 100) if total > 0 else 0
+
+            insights["task_type_performance"][task_type] = {
+                "attempts": total,
+                "success_rate": round(success_rate, 2),
+                "top_keywords": perf["common_keywords"][:5]
+            }
+
+        # Overall success rate
+        if self.experience_buffer:
+            overall_successes = sum(1 for exp in self.experience_buffer if exp["success"])
+            insights["overall_success_rate"] = round(
+                overall_successes / len(self.experience_buffer) * 100, 2
+            )
+        else:
+            insights["overall_success_rate"] = 0.0
+
+        # Recent performance (last 20 tasks)
+        if len(self.experience_buffer) >= 20:
+            recent_successes = sum(
+                1 for exp in self.experience_buffer[-20:]
+                if exp["success"]
+            )
+            insights["recent_success_rate"] = round(recent_successes / 20 * 100, 2)
+
+        return insights
 
     def _classify_task(self, prompt: str) -> str:
         """Simple task classification"""

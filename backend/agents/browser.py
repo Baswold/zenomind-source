@@ -1,6 +1,10 @@
 """
 Enhanced Browser Agent - Multi-tab browsing with intelligent context management
-Signature Feature: Advanced browser capabilities beyond standard OpenManus
+Signature Features:
+- Advanced browser capabilities beyond standard OpenManus
+- Session persistence and restoration
+- Cookie and storage management
+- Automatic state saving
 """
 
 from typing import List, Dict, Optional, Any
@@ -8,6 +12,8 @@ from datetime import datetime
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from loguru import logger
 import asyncio
+import json
+from pathlib import Path
 
 
 class BrowserTab:
@@ -37,13 +43,23 @@ class EnhancedBrowserAgent:
     - Multi-tab browsing (up to 10 tabs)
     - Automatic tab switching and context management
     - Screenshot capture per tab
-    - Session persistence
+    - Session persistence and restoration
+    - Cookie and storage management
+    - Automatic state saving
     - Intelligent resource management
     """
 
-    def __init__(self, max_tabs: int = 10, headless: bool = False):
+    def __init__(
+        self,
+        max_tabs: int = 10,
+        headless: bool = False,
+        session_id: Optional[str] = None,
+        persist_sessions: bool = True
+    ):
         self.max_tabs = max_tabs
         self.headless = headless
+        self.session_id = session_id or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.persist_sessions = persist_sessions
 
         self.playwright = None
         self.browser: Optional[Browser] = None
@@ -53,8 +69,22 @@ class EnhancedBrowserAgent:
 
         self.tab_counter = 0
 
-    async def initialize(self):
-        """Initialize the browser"""
+        # Session persistence
+        self.session_dir = Path("./data/browser_sessions")
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.session_file = self.session_dir / f"{self.session_id}.json"
+
+        # Auto-save interval (seconds)
+        self.auto_save_interval = 60
+        self.auto_save_task: Optional[asyncio.Task] = None
+
+    async def initialize(self, restore_session: bool = True):
+        """
+        Initialize the browser
+
+        Args:
+            restore_session: Whether to restore previous session if available
+        """
         logger.info("🌐 Initializing enhanced browser...")
 
         self.playwright = await async_playwright().start()
@@ -73,6 +103,169 @@ class EnhancedBrowserAgent:
         )
 
         logger.info("✅ Enhanced browser initialized")
+
+        # Restore previous session if requested
+        if restore_session and self.session_file.exists():
+            await self.restore_session()
+
+        # Start auto-save if persistence enabled
+        if self.persist_sessions:
+            self.auto_save_task = asyncio.create_task(self._auto_save_loop())
+            logger.info(f"💾 Auto-save enabled (interval: {self.auto_save_interval}s)")
+
+    async def save_session(self) -> Dict[str, Any]:
+        """
+        Save current browser session to disk
+
+        Returns:
+            Session data
+        """
+        session_data = {
+            "session_id": self.session_id,
+            "saved_at": datetime.now().isoformat(),
+            "max_tabs": self.max_tabs,
+            "active_tab_id": self.active_tab_id,
+            "tab_counter": self.tab_counter,
+            "tabs": []
+        }
+
+        # Save tab information
+        for tab_id, tab in self.tabs.items():
+            tab_data = {
+                "tab_id": tab_id,
+                "url": tab.url,
+                "title": tab.title,
+                "created_at": tab.created_at.isoformat(),
+                "last_accessed": tab.last_accessed.isoformat()
+            }
+            session_data["tabs"].append(tab_data)
+
+        # Save cookies from context
+        if self.context:
+            cookies = await self.context.cookies()
+            session_data["cookies"] = cookies
+
+        # Save to file
+        with open(self.session_file, 'w') as f:
+            json.dump(session_data, f, indent=2)
+
+        logger.info(f"💾 Session saved: {self.session_id} ({len(self.tabs)} tabs)")
+
+        return session_data
+
+    async def restore_session(self) -> bool:
+        """
+        Restore browser session from disk
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.session_file.exists():
+            logger.warning(f"No saved session found: {self.session_id}")
+            return False
+
+        try:
+            with open(self.session_file, 'r') as f:
+                session_data = json.load(f)
+
+            logger.info(f"📂 Restoring session: {session_data['session_id']} from {session_data['saved_at']}")
+
+            # Restore cookies
+            if "cookies" in session_data and self.context:
+                await self.context.add_cookies(session_data["cookies"])
+                logger.info(f"🍪 Restored {len(session_data['cookies'])} cookies")
+
+            # Restore tabs
+            for tab_data in session_data.get("tabs", []):
+                try:
+                    # Create new tab with saved URL
+                    tab_id = await self.new_tab(url=tab_data["url"])
+
+                    # Restore metadata
+                    tab = self.tabs[tab_id]
+                    tab.tab_id = tab_data["tab_id"]  # Use original tab_id
+                    tab.title = tab_data.get("title")
+                    tab.created_at = datetime.fromisoformat(tab_data["created_at"])
+                    tab.last_accessed = datetime.fromisoformat(tab_data["last_accessed"])
+
+                    # Update tabs dict with original tab_id
+                    if tab_id != tab_data["tab_id"]:
+                        self.tabs[tab_data["tab_id"]] = tab
+                        del self.tabs[tab_id]
+
+                    logger.info(f"📑 Restored tab: {tab_data['tab_id']} - {tab_data['url']}")
+
+                except Exception as e:
+                    logger.error(f"Failed to restore tab {tab_data['tab_id']}: {e}")
+
+            # Restore active tab
+            if session_data.get("active_tab_id") and session_data["active_tab_id"] in self.tabs:
+                self.active_tab_id = session_data["active_tab_id"]
+
+            # Restore counter
+            self.tab_counter = session_data.get("tab_counter", self.tab_counter)
+
+            logger.info(f"✅ Session restored: {len(self.tabs)} tabs")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to restore session: {e}")
+            return False
+
+    async def _auto_save_loop(self):
+        """Automatic session saving loop"""
+        while True:
+            try:
+                await asyncio.sleep(self.auto_save_interval)
+
+                if self.tabs:  # Only save if there are tabs
+                    await self.save_session()
+
+            except asyncio.CancelledError:
+                # Save one last time before exiting
+                if self.tabs:
+                    await self.save_session()
+                break
+            except Exception as e:
+                logger.error(f"Auto-save error: {e}")
+
+    async def clear_session(self):
+        """Clear saved session data"""
+        if self.session_file.exists():
+            self.session_file.unlink()
+            logger.info(f"🗑️ Cleared session: {self.session_id}")
+
+    @classmethod
+    async def list_saved_sessions(cls, session_dir: str = "./data/browser_sessions") -> List[Dict[str, Any]]:
+        """
+        List all saved browser sessions
+
+        Returns:
+            List of session information
+        """
+        session_path = Path(session_dir)
+        if not session_path.exists():
+            return []
+
+        sessions = []
+
+        for session_file in session_path.glob("*.json"):
+            try:
+                with open(session_file, 'r') as f:
+                    session_data = json.load(f)
+
+                sessions.append({
+                    "session_id": session_data["session_id"],
+                    "saved_at": session_data["saved_at"],
+                    "num_tabs": len(session_data.get("tabs", [])),
+                    "file": str(session_file)
+                })
+
+            except Exception as e:
+                logger.error(f"Failed to read session file {session_file}: {e}")
+
+        return sessions
 
     async def new_tab(self, url: str = "about:blank") -> str:
         """
@@ -249,13 +442,32 @@ class EnhancedBrowserAgent:
             for tab in self.tabs.values()
         ]
 
-    async def cleanup(self):
-        """Cleanup browser resources"""
+    async def cleanup(self, save_session: bool = True):
+        """
+        Cleanup browser resources
+
+        Args:
+            save_session: Whether to save session before cleanup
+        """
         logger.info("🧹 Cleaning up enhanced browser...")
 
+        # Stop auto-save task
+        if self.auto_save_task:
+            self.auto_save_task.cancel()
+            try:
+                await self.auto_save_task
+            except asyncio.CancelledError:
+                pass
+
+        # Save session if requested
+        if save_session and self.persist_sessions and self.tabs:
+            await self.save_session()
+
+        # Close all tabs
         for tab in list(self.tabs.values()):
             await tab.page.close()
 
+        # Close browser context and browser
         if self.context:
             await self.context.close()
 

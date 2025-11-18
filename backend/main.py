@@ -26,6 +26,14 @@ from tasks.queue import task_queue
 from memory.vector_store import MemoryStore
 from websocket.consciousness import ConsciousnessStreamer
 
+# Import analytics router
+try:
+    from api.analytics import router as analytics_router
+    ANALYTICS_AVAILABLE = True
+except ImportError:
+    ANALYTICS_AVAILABLE = False
+    logger.warning("Analytics module not available")
+
 # Configure logger
 logger.add("logs/zenomind.log", rotation="100 MB", retention="10 days", level="INFO")
 
@@ -126,6 +134,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include analytics router if available
+if ANALYTICS_AVAILABLE:
+    app.include_router(analytics_router)
+    logger.info("📊 Analytics endpoints enabled")
 
 
 @app.get("/")
