@@ -10,10 +10,11 @@ from pathlib import Path
 # Add openmanus to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "openmanus-source"))
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -25,6 +26,9 @@ from agents.ambient import AmbientAgent
 from tasks.queue import task_queue
 from memory.vector_store import MemoryStore
 from websocket.consciousness import ConsciousnessStreamer
+from database import init_db, close_db, get_db
+from database.repository import TaskRepository, AgentRepository, MetricRepository
+from database.models import TaskStatus as DBTaskStatus, TaskPriority
 
 # Configure logger
 logger.add("logs/zenomind.log", rotation="100 MB", retention="10 days", level="INFO")
@@ -67,7 +71,7 @@ class AppState:
     """Application state"""
     def __init__(self):
         self.agents: Dict[str, AmbientAgent] = {}
-        self.tasks: Dict[str, Dict] = {}
+        self.tasks: Dict[str, Dict] = {}  # In-memory cache for quick access
         self.memory_store: Optional[MemoryStore] = None
         self.consciousness_streamer: Optional[ConsciousnessStreamer] = None
         self.websocket_connections: List[WebSocket] = []
@@ -75,10 +79,20 @@ class AppState:
 app_state = AppState()
 
 
+# Database dependency
+async def get_session() -> AsyncSession:
+    """Alias for get_db for convenience"""
+    async for session in get_db():
+        yield session
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle management"""
     logger.info("🚀 Starting ZenoMind Ambient Agent...")
+
+    # Initialize database
+    await init_db()
 
     # Initialize memory store
     app_state.memory_store = MemoryStore()
@@ -99,6 +113,44 @@ async def lifespan(app: FastAPI):
     app_state.agents["default"] = default_agent
     logger.info("🤖 Default ambient agent created")
 
+    # Register agent in database
+    async for db in get_db():
+        await AgentRepository.get_or_create(
+            db,
+            "default",
+            name="Default Ambient Agent",
+            description="Primary autonomous agent"
+        )
+        await db.commit()
+        break
+
+    # Load pending/running tasks from database and resume them
+    async for db in get_db():
+        pending_tasks = await TaskRepository.get_all(
+            db,
+            status=DBTaskStatus.RUNNING,
+            limit=100
+        )
+        logger.info(f"📋 Found {len(pending_tasks)} running tasks to resume")
+
+        for task_db in pending_tasks:
+            # Mark as queued for retry
+            await TaskRepository.update_status(
+                db,
+                task_db.task_id,
+                DBTaskStatus.QUEUED,
+                error="Server restarted, task will be retried"
+            )
+
+            # Cache in memory
+            app_state.tasks[task_db.task_id] = task_db.to_dict()
+
+            # Re-queue the task
+            asyncio.create_task(execute_task(task_db.task_id))
+
+        await db.commit()
+        break
+
     yield
 
     # Cleanup
@@ -107,6 +159,7 @@ async def lifespan(app: FastAPI):
         await agent.cleanup()
     if app_state.memory_store:
         await app_state.memory_store.close()
+    await close_db()
     logger.info("✅ Shutdown complete")
 
 
@@ -142,32 +195,30 @@ async def root():
 
 
 @app.post("/api/tasks", response_model=TaskResponse)
-async def create_task(request: TaskRequest):
-    """Create a new task"""
+async def create_task(request: TaskRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new task with database persistence"""
     task_id = str(uuid.uuid4())
 
-    task_data = {
-        "task_id": task_id,
-        "prompt": request.prompt,
-        "priority": request.priority,
-        "max_duration": request.max_duration,
-        "enable_browser": request.enable_browser,
-        "enable_learning": request.enable_learning,
-        "status": "queued",
-        "progress": 0.0,
-        "created_at": datetime.now(),
-        "started_at": None,
-        "completed_at": None,
-        "current_step": None,
-        "result": None,
-        "error": None,
-        "thoughts": [],
-        "actions": []
-    }
+    # Create task in database
+    task_db = await TaskRepository.create(
+        db,
+        {
+            "task_id": task_id,
+            "prompt": request.prompt,
+            "priority": request.priority,
+            "max_duration": request.max_duration,
+            "enable_browser": request.enable_browser,
+            "enable_learning": request.enable_learning,
+            "status": DBTaskStatus.QUEUED,
+            "agent_id": "default"
+        }
+    )
+    await db.commit()
 
-    app_state.tasks[task_id] = task_data
+    # Cache in memory for quick access
+    app_state.tasks[task_id] = task_db.to_dict()
 
-    # Queue the task
+    # Queue the task for execution
     asyncio.create_task(execute_task(task_id))
 
     logger.info(f"📝 Task created: {task_id} - {request.prompt[:50]}...")
@@ -175,21 +226,34 @@ async def create_task(request: TaskRequest):
     return TaskResponse(
         task_id=task_id,
         status="queued",
-        created_at=task_data["created_at"],
+        created_at=task_db.created_at,
         message="Task queued successfully"
     )
 
 
 async def execute_task(task_id: str):
-    """Execute a task asynchronously"""
+    """Execute a task asynchronously with database persistence"""
     task = app_state.tasks.get(task_id)
     if not task:
         logger.error(f"Task {task_id} not found")
         return
 
+    start_time = datetime.now()
+
     try:
+        # Update status to running in database and cache
+        async for db in get_db():
+            await TaskRepository.update_status(
+                db,
+                task_id,
+                DBTaskStatus.RUNNING,
+                started_at=start_time
+            )
+            await db.commit()
+            break
+
         task["status"] = "running"
-        task["started_at"] = datetime.now()
+        task["started_at"] = start_time
 
         # Get agent
         agent = app_state.agents.get("default")
@@ -204,18 +268,77 @@ async def execute_task(task_id: str):
             enable_browser=task["enable_browser"]
         )
 
+        # Calculate duration
+        duration = (datetime.now() - start_time).total_seconds()
+
+        # Update task as completed in database
+        async for db in get_db():
+            await TaskRepository.complete_task(db, task_id, result, success=True)
+
+            # Update agent metrics
+            await AgentRepository.increment_task_count(
+                db,
+                "default",
+                success=True,
+                duration=duration
+            )
+
+            # Record metrics
+            await MetricRepository.record(
+                db,
+                "task_duration",
+                duration,
+                metric_type="histogram",
+                agent_id="default",
+                task_id=task_id,
+                labels={"status": "completed"}
+            )
+
+            await db.commit()
+            break
+
         task["status"] = "completed"
         task["result"] = result
         task["progress"] = 1.0
         task["completed_at"] = datetime.now()
 
-        logger.info(f"✅ Task completed: {task_id}")
+        logger.info(f"✅ Task completed: {task_id} (duration: {duration:.2f}s)")
 
         # Broadcast completion
         await broadcast_task_update(task_id)
 
     except Exception as e:
         logger.error(f"❌ Task failed: {task_id} - {str(e)}")
+
+        # Calculate duration
+        duration = (datetime.now() - start_time).total_seconds()
+
+        # Update task as failed in database
+        async for db in get_db():
+            await TaskRepository.complete_task(db, task_id, str(e), success=False)
+
+            # Update agent metrics
+            await AgentRepository.increment_task_count(
+                db,
+                "default",
+                success=False,
+                duration=duration
+            )
+
+            # Record metrics
+            await MetricRepository.record(
+                db,
+                "task_duration",
+                duration,
+                metric_type="histogram",
+                agent_id="default",
+                task_id=task_id,
+                labels={"status": "failed"}
+            )
+
+            await db.commit()
+            break
+
         task["status"] = "failed"
         task["error"] = str(e)
         task["completed_at"] = datetime.now()
@@ -224,39 +347,68 @@ async def execute_task(task_id: str):
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskStatus)
-async def get_task_status(task_id: str):
-    """Get task status"""
+async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
+    """Get task status from database"""
+    # Try cache first
     task = app_state.tasks.get(task_id)
-    if not task:
+    if task:
+        return TaskStatus(**task)
+
+    # Fallback to database
+    task_db = await TaskRepository.get_by_id(db, task_id)
+    if not task_db:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    return TaskStatus(**task)
+    task_dict = task_db.to_dict()
+    app_state.tasks[task_id] = task_dict  # Cache it
+
+    return TaskStatus(**task_dict)
 
 
 @app.get("/api/tasks")
-async def list_tasks(status: Optional[str] = None, limit: int = 50):
-    """List tasks"""
-    tasks = list(app_state.tasks.values())
+async def list_tasks(
+    status: Optional[str] = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+):
+    """List tasks from database"""
+    # Convert status string to enum if provided
+    status_enum = DBTaskStatus(status) if status else None
 
-    if status:
-        tasks = [t for t in tasks if t["status"] == status]
+    # Get tasks from database
+    tasks_db = await TaskRepository.get_all(db, status=status_enum, limit=limit)
 
-    # Sort by created_at descending
-    tasks.sort(key=lambda x: x["created_at"], reverse=True)
+    # Convert to dicts and update cache
+    tasks = []
+    for task_db in tasks_db:
+        task_dict = task_db.to_dict()
+        app_state.tasks[task_db.task_id] = task_dict
+        tasks.append(task_dict)
 
-    return {"tasks": tasks[:limit], "total": len(tasks)}
+    return {"tasks": tasks, "total": len(tasks)}
 
 
 @app.delete("/api/tasks/{task_id}")
-async def cancel_task(task_id: str):
+async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)):
     """Cancel a task"""
-    task = app_state.tasks.get(task_id)
-    if not task:
+    task_db = await TaskRepository.get_by_id(db, task_id)
+    if not task_db:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if task["status"] == "running":
-        task["status"] = "cancelled"
-        task["completed_at"] = datetime.now()
+    if task_db.status == DBTaskStatus.RUNNING or task_db.status == DBTaskStatus.QUEUED:
+        await TaskRepository.update_status(
+            db,
+            task_id,
+            DBTaskStatus.CANCELLED,
+            completed_at=datetime.now()
+        )
+        await db.commit()
+
+        # Update cache
+        if task_id in app_state.tasks:
+            app_state.tasks[task_id]["status"] = "cancelled"
+            app_state.tasks[task_id]["completed_at"] = datetime.now()
+
         logger.info(f"🛑 Task cancelled: {task_id}")
 
     return {"message": "Task cancelled", "task_id": task_id}
@@ -283,18 +435,76 @@ async def get_recent_memories(limit: int = 20):
 
 
 @app.get("/api/agents")
-async def list_agents():
-    """List all agents"""
-    agents = []
-    for agent_id, agent in app_state.agents.items():
-        agents.append({
-            "agent_id": agent_id,
-            "status": agent.status,
-            "tasks_completed": agent.tasks_completed,
-            "created_at": agent.created_at.isoformat()
-        })
+async def list_agents(db: AsyncSession = Depends(get_db)):
+    """List all agents with metrics from database"""
+    agents_db = await AgentRepository.get_all(db)
+
+    agents = [agent.to_dict() for agent in agents_db]
 
     return {"agents": agents}
+
+
+@app.get("/api/agents/{agent_id}")
+async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
+    """Get detailed agent information"""
+    agent_db = await AgentRepository.get_by_id(db, agent_id)
+    if not agent_db:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    return agent_db.to_dict()
+
+
+@app.get("/api/metrics/tasks")
+async def get_task_metrics(
+    agent_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get task statistics"""
+    stats = await TaskRepository.get_statistics(db, agent_id=agent_id)
+    return stats
+
+
+@app.get("/api/metrics/time-series/{metric_name}")
+async def get_metric_time_series(
+    metric_name: str,
+    agent_id: Optional[str] = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get time series data for a metric"""
+    metrics = await MetricRepository.get_time_series(
+        db,
+        metric_name=metric_name,
+        agent_id=agent_id,
+        limit=limit
+    )
+
+    return {
+        "metric_name": metric_name,
+        "data": [m.to_dict() for m in metrics]
+    }
+
+
+@app.get("/api/metrics/aggregate/{metric_name}")
+async def get_metric_aggregate(
+    metric_name: str,
+    aggregation: str = "avg",
+    agent_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get aggregated metric value"""
+    value = await MetricRepository.get_aggregated(
+        db,
+        metric_name=metric_name,
+        aggregation=aggregation,
+        agent_id=agent_id
+    )
+
+    return {
+        "metric_name": metric_name,
+        "aggregation": aggregation,
+        "value": value
+    }
 
 
 @app.websocket("/ws/consciousness")

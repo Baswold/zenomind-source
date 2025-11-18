@@ -172,7 +172,8 @@ class ConsciousnessStreamer:
         agent_id: str,
         task_id: str,
         emotion: str,
-        intensity: float = 0.5
+        intensity: float = 0.5,
+        reason: Optional[str] = None
     ):
         """
         Emit an emotion event (agent state)
@@ -182,13 +183,70 @@ class ConsciousnessStreamer:
             task_id: Task identifier
             emotion: Emotion name (curious, focused, stuck, satisfied, etc.)
             intensity: Emotion intensity (0.0 to 1.0)
+            reason: Optional reason for the emotion
         """
+        metadata = {"intensity": intensity}
+        if reason:
+            metadata["reason"] = reason
+
         event = ConsciousnessEvent(
             event_type="emotion",
             agent_id=agent_id,
             task_id=task_id,
             content=emotion,
-            metadata={"intensity": intensity}
+            metadata=metadata
+        )
+
+        await self._broadcast_event(event)
+
+    async def emit_progress(
+        self,
+        agent_id: str,
+        task_id: str,
+        progress: float,
+        step_description: str
+    ):
+        """
+        Emit a progress update event
+
+        Args:
+            agent_id: Agent identifier
+            task_id: Task identifier
+            progress: Progress percentage (0.0 to 1.0)
+            step_description: Description of current step
+        """
+        event = ConsciousnessEvent(
+            event_type="progress",
+            agent_id=agent_id,
+            task_id=task_id,
+            content=step_description,
+            metadata={"progress": progress}
+        )
+
+        await self._broadcast_event(event)
+
+    async def emit_insight(
+        self,
+        agent_id: str,
+        task_id: str,
+        insight: str,
+        confidence: float = 0.5
+    ):
+        """
+        Emit an insight/discovery event
+
+        Args:
+            agent_id: Agent identifier
+            task_id: Task identifier
+            insight: The insight discovered
+            confidence: Confidence in the insight (0.0 to 1.0)
+        """
+        event = ConsciousnessEvent(
+            event_type="insight",
+            agent_id=agent_id,
+            task_id=task_id,
+            content=insight,
+            metadata={"confidence": confidence}
         )
 
         await self._broadcast_event(event)
