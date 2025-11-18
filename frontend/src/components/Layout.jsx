@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { Brain, Home, ListTodo, Waves, Database, Menu, X } from 'lucide-react'
+import { Brain, Home, ListTodo, Waves, Database, Menu, X, Activity } from 'lucide-react'
 
 export default function Layout({ children }) {
   const location = useLocation()
@@ -11,6 +11,7 @@ export default function Layout({ children }) {
     { name: 'Tasks', href: '/tasks', icon: ListTodo },
     { name: 'Consciousness', href: '/consciousness', icon: Waves },
     { name: 'Memory Palace', href: '/memory', icon: Database },
+    { name: 'Metrics', href: '/metrics', icon: Activity },
   ]
 
   const isActive = (href) => {

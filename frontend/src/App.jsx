@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard'
 import TasksPage from './pages/TasksPage'
 import ConsciousnessPage from './pages/ConsciousnessPage'
 import MemoryPalace from './pages/MemoryPalace'
+import MetricsPage from './pages/MetricsPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,6 +27,7 @@ function App() {
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/consciousness" element={<ConsciousnessPage />} />
             <Route path="/memory" element={<MemoryPalace />} />
+            <Route path="/metrics" element={<MetricsPage />} />
           </Routes>
         </Layout>
       </Router>
